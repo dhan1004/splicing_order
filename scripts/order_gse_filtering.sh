@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SLURM directives (if running as standalone job)
-#SBATCH --job-name=order_of_splicing
+#SBATCH --job-name=splicing_pipeline
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --time=04:00:00
@@ -63,30 +63,50 @@ conda activate order_env
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Active environment: $CONDA_DEFAULT_ENV\n"
 
 ################################################################################
-# CHECKPOINT 1: Check if trimmed files exist
+# CHECKPOINT 1: Check if final output already exists
 ################################################################################
 
-skip_to_alignment=true
-
-# if [ -f "$paired_trimmed_one_file" ] && [ -f "$paired_trimmed_two_file" ]; then
-#     printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimmed files found. Skipping download and trimming...\n"
-#     skip_to_alignment=true
-# else
-#     skip_to_alignment=false
+# if [ -f "$splicing_order_output" ] && [ -s "$splicing_order_output" ]; then
+#     printf "$(date +'%d/%b/%Y %H:%M:%S') | Final output already exists. Sample complete!\n"
+#     exit 0
 # fi
 
 ################################################################################
-# DOWNLOAD & TRIM (if needed)
+# CHECKPOINT 2: Check if alignment exists (most important checkpoint)
 ################################################################################
 
-if [ "$skip_to_alignment" = false ]; then
+if [ -f "$aligned_bam_file" ] && [ -s "$aligned_bam_file" ]; then
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | STAR alignment file found. Skipping to informative pairs extraction...\n"
+    skip_to_extraction=true
+else
+    skip_to_extraction=false
+fi
+
+################################################################################
+# CHECKPOINT 3: Check if trimmed files exist (only matters if we need alignment)
+################################################################################
+
+if [ "$skip_to_extraction" = false ]; then
+    if [ -f "$paired_trimmed_one_file" ] && [ -f "$paired_trimmed_two_file" ]; then
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimmed files found. Skipping download and trimming...\n"
+        skip_to_alignment=true
+    else
+        skip_to_alignment=false
+    fi
+fi
+
+################################################################################
+# DOWNLOAD & TRIM (only if we need to align)
+################################################################################
+
+if [ "$skip_to_extraction" = false ] && [ "$skip_to_alignment" = false ]; then
 
     # --- CHECKPOINT 2: Check if raw reads exist ---
     if [ -f "$paired_read_one_file" ] && [ -f "$paired_read_two_file" ] && [ -s "$paired_read_one_file" ]; then
         printf "$(date +'%d/%b/%Y %H:%M:%S') | Raw paired reads found. Skipping download...\n"
     else
-        # Switch to fastq-dl environment for downloading
-        conda activate /users/dhan30/.conda/envs/fastq_dl_env
+        # Switch to splicing_pipeline environment for downloading
+        # (keeping the same environment since all tools are here now)
         
         printf "$(date +'%d/%b/%Y %H:%M:%S') | Downloading reads for %s...\n" "${gsm_id}"
         IFS=',' read -r -a srr_id_list <<< "$srr_id_input"
@@ -108,8 +128,15 @@ if [ "$skip_to_alignment" = false ]; then
             else
                 printf "ERROR: Expected paired-end data for %s but didn't find _1 and _2 files.\n" "${srr}"
                 printf "This pipeline only supports paired-end RNA-seq data.\n"
-                rm -rf "${out_dir}"
-
+                
+                # Log failure reason
+                echo "FAILURE: Single-end data detected for ${srr}" > "${out_dir}/FAILED_REASON.txt"
+                echo "Date: $(date)" >> "${out_dir}/FAILED_REASON.txt"
+                echo "SRA ID: ${srr}" >> "${out_dir}/FAILED_REASON.txt"
+                
+                # Delete everything except logs
+                find "${out_dir}" -type f ! -name "*.log" ! -name "FAILED_REASON.txt" -delete
+                
                 exit 1
             fi
 
@@ -117,21 +144,23 @@ if [ "$skip_to_alignment" = false ]; then
         done
 
         printf "$(date +'%d/%b/%Y %H:%M:%S') | Download complete for %s.\n" "${gsm_id}"
-        
-        # Switch back to analysis environment
-        conda deactivate
-        conda activate /users/dhan30/.conda/envs/order_env
     fi
 
     # --- Validate we have paired-end data ---
     if [ ! -f "$paired_read_one_file" ] || [ ! -f "$paired_read_two_file" ]; then
         printf "ERROR: Paired-end read files not found for %s\n" "${gsm_id}"
         printf "This pipeline requires paired-end RNA-seq data.\n"
+        printf "Cleaning up incomplete data for sample %s...\n" "${gsm_id}"
+        
+        # Clean up the output directory
+        rm -rf "${out_dir}"
+        
         exit 1
     fi
 
     # --- Trimming with fastp ---
     # Switch to fastq_dl_env if fastp is there
+    conda activate /users/dhan30/.conda/envs/fastq_dl_env
     
     printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimming reads for %s...\n" "${gsm_id}"
     fastp_report_json="${out_dir}/${gsm_id}_fastp.json"
@@ -146,19 +175,41 @@ if [ "$skip_to_alignment" = false ]; then
         --thread "$threads" \
         --json "$fastp_report_json" \
         --html "$fastp_report_html" ||
-        { printf "ERROR: fastp failed for %s\n" "${gsm_id}"; exit 1; }
+        { printf "ERROR: fastp failed for %s\n" "${gsm_id}"; 
+          rm -f "$paired_trimmed_one_file" "$paired_trimmed_two_file"; 
+          exit 1; }
+
+    # Verify trimmed files are not corrupted
+    if ! gzip -t "$paired_trimmed_one_file" 2>/dev/null; then
+        printf "ERROR: Corrupted trimmed file 1 for %s\n" "${gsm_id}"
+        rm -f "$paired_trimmed_one_file" "$paired_trimmed_two_file"
+        exit 1
+    fi
+    if ! gzip -t "$paired_trimmed_two_file" 2>/dev/null; then
+        printf "ERROR: Corrupted trimmed file 2 for %s\n" "${gsm_id}"
+        rm -f "$paired_trimmed_one_file" "$paired_trimmed_two_file"
+        exit 1
+    fi
 
     rm "$paired_read_one_file" "$paired_read_two_file"
     printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimming complete for %s.\n" "${gsm_id}"
+    
+    # Switch back to order_env for alignment
+    conda deactivate
+    conda activate /users/dhan30/.conda/envs/order_env
 fi
 
 ################################################################################
-# CHECKPOINT 3: Check if alignment exists
+# ALIGNMENT (only if we don't have STAR BAM)
 ################################################################################
 
-if [ -f "$aligned_bam_file" ] && [ -s "$aligned_bam_file" ]; then
-    printf "$(date +'%d/%b/%Y %H:%M:%S') | STAR alignment file found. Skipping alignment...\n"
-else
+if [ "$skip_to_extraction" = false ]; then
+    # Check if trimmed files exist before attempting alignment
+    if [ ! -f "$paired_trimmed_one_file" ] || [ ! -f "$paired_trimmed_two_file" ]; then
+        printf "ERROR: Cannot run alignment - trimmed files not found\n"
+        exit 1
+    fi
+    
     # --- STAR Alignment ---
     printf "$(date +'%d/%b/%Y %H:%M:%S') | Aligning reads for %s using STAR...\n" "${gsm_id}"
 
@@ -177,7 +228,15 @@ else
     fi
 
     printf "$(date +'%d/%b/%Y %H:%M:%S') | STAR alignment complete for %s.\n" "${gsm_id}"
-fi
+    
+    # Clean up trimmed fastq files after successful alignment
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleaning up trimmed fastq files...\n"
+    rm -f "$paired_trimmed_one_file" "$paired_trimmed_two_file"
+    
+    # Clean up STAR intermediate files
+    rm -f "${star_out_prefix}"Log.out "${star_out_prefix}"Log.progress.out
+    rm -f "${star_out_prefix}"SJ.out.tab
+fi  # End of alignment block
 
 ################################################################################
 # EXTRACT INFORMATIVE PAIRS (Kim et al. methodology)
@@ -227,9 +286,14 @@ printf "$(date +'%d/%b/%Y %H:%M:%S') |   Removing duplicates...\n"
 samtools markdup -r -@ "$threads" "${SORTED_BAM_PREFIX}.bam" "${informative_pairs_bam}"
 samtools index "${informative_pairs_bam}"
 
-# Cleanup intermediate files
-# rm "${PAIRED_JUNCS_SAM}" "${INTRON_OVERLAP_BED}" 
-# rm "${SORTED_BAM_PREFIX}.bam" "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt"
+# Cleanup intermediate files to save space
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleaning up intermediate files...\n"
+rm -f "${PAIRED_JUNCS_SAM}" "${INTRON_OVERLAP_BED}" 
+rm -f "${SORTED_BAM_PREFIX}.bam" "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt"
+
+# Optionally delete STAR alignment BAM if you only need informative pairs
+# Uncomment the line below if you want to save even more space
+# rm -f "${aligned_bam_file}" "${aligned_bam_file}.bai"
 
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Informative pairs extraction complete.\n"
 printf "  Total reads: $(samtools view -c ${informative_pairs_bam})\n"
@@ -241,7 +305,15 @@ printf "  Read pairs: $(($(samtools view -c ${informative_pairs_bam}) / 2))\n"
 
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Analyzing splicing order...\n"
 
-python3 "${SCRIPT_DIR}/analyze_splicing_order.py" \
+# Use optimized script if available, otherwise use original
+if [ -f "${SCRIPT_DIR}/analyze_splicing_order_optimized.py" ]; then
+    ANALYSIS_SCRIPT="${SCRIPT_DIR}/analyze_splicing_order_optimized.py"
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Using optimized analysis script\n"
+else
+    ANALYSIS_SCRIPT="${SCRIPT_DIR}/analyze_splicing_order.py"
+fi
+
+python3 "$ANALYSIS_SCRIPT" \
     --bam "${informative_pairs_bam}" \
     --intron-bed "${intron_bed_file}" \
     --output "${splicing_order_output}" \
@@ -252,5 +324,14 @@ python3 "${SCRIPT_DIR}/analyze_splicing_order.py" \
 
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Sample %s processing complete!\n" "${gsm_id}"
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Results: %s\n" "${splicing_order_output}"
+
+# Cleanup intermediate files to save space
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleaning up intermediate files...\n"
+rm -f "$paired_read_one_file" "$paired_read_two_file" 2>/dev/null
+rm -f "$paired_trimmed_one_file" "$paired_trimmed_two_file" 2>/dev/null
+rm -f "${star_out_prefix}"*.out "${star_out_prefix}"*.tab 2>/dev/null
+rm -f "${out_dir}"/temp_* 2>/dev/null
+
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleanup complete.\n"
 
 conda deactivate
