@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=order_splice
-#SBATCH --array=1-1000%100
+#SBATCH --array=1001-1762%100
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16  # Match THREADS below
 #SBATCH --mem=48G  # Good for STAR (needs ~35GB for human)

@@ -71,6 +71,18 @@ printf "$(date +'%d/%b/%Y %H:%M:%S') | Active environment: $CONDA_DEFAULT_ENV\n"
 #     exit 0
 # fi
 
+if [ -f "$splicing_order_output" ] && [ -s "$splicing_order_output" ]; then
+    line_count=$(wc -l < "$splicing_order_output")
+    
+    if [ "$line_count" -gt 1 ]; then
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | Final output exists with $((line_count - 1)) intron pairs. Sample complete!\n"
+        exit 0
+    else
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | Output file is empty (header only). Reprocessing...\n"
+        rm -f "$splicing_order_output"
+    fi
+fi
+
 ################################################################################
 # CHECKPOINT 2: Check if alignment exists (most important checkpoint)
 ################################################################################
@@ -160,7 +172,7 @@ if [ "$skip_to_extraction" = false ] && [ "$skip_to_alignment" = false ]; then
 
     # --- Trimming with fastp ---
     # Switch to fastq_dl_env if fastp is there
-    conda activate /users/dhan30/.conda/envs/fastq_dl_env
+    # conda activate /users/dhan30/.conda/envs/fastq_dl_env
     
     printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimming reads for %s...\n" "${gsm_id}"
     fastp_report_json="${out_dir}/${gsm_id}_fastp.json"
@@ -195,8 +207,8 @@ if [ "$skip_to_extraction" = false ] && [ "$skip_to_alignment" = false ]; then
     printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimming complete for %s.\n" "${gsm_id}"
     
     # Switch back to order_env for alignment
-    conda deactivate
-    conda activate /users/dhan30/.conda/envs/order_env
+    # conda deactivate
+    # conda activate /users/dhan30/.conda/envs/order_env
 fi
 
 ################################################################################
@@ -305,15 +317,21 @@ printf "  Read pairs: $(($(samtools view -c ${informative_pairs_bam}) / 2))\n"
 
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Analyzing splicing order...\n"
 
-# Use optimized script if available, otherwise use original
-if [ -f "${SCRIPT_DIR}/analyze_splicing_order_optimized.py" ]; then
-    ANALYSIS_SCRIPT="${SCRIPT_DIR}/analyze_splicing_order_optimized.py"
-    printf "$(date +'%d/%b/%Y %H:%M:%S') | Using optimized analysis script\n"
-else
-    ANALYSIS_SCRIPT="${SCRIPT_DIR}/analyze_splicing_order.py"
-fi
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Ensuring conda environment is active...\n"
+module load miniconda3/23.11.0s
+source /oscar/runtime/software/external/miniconda3/23.11.0/etc/profile.d/conda.sh
+conda activate order_env
 
-python3 "$ANALYSIS_SCRIPT" \
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Active environment: $CONDA_DEFAULT_ENV\n"
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Python location: $(which python3)\n"
+
+# Verify pysam is available
+python3 -c "import pysam" || {
+    printf "ERROR: pysam not available in environment\n"
+    exit 1
+}
+
+python3 scripts/analyze_splicing_order.py \
     --bam "${informative_pairs_bam}" \
     --intron-bed "${intron_bed_file}" \
     --output "${splicing_order_output}" \

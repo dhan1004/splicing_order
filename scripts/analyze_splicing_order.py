@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Optimized splicing order analysis using interval trees for fast lookups.
-"""
 
 import pysam
 import argparse
@@ -9,237 +6,270 @@ from collections import defaultdict
 import sys
 import gzip
 
-def load_intron_annotations(intron_bed_file):
+def load_introns_simple(intron_bed_file):
     """
-    Load intron annotations and organize by chromosome for fast lookup.
-    
-    Returns:
-        dict: {chrom: [(start, end, gene_id), ...]}
+    Load introns into a simple lookup structure.
+    Returns: (intron_dict, gene_dict)
+    - intron_dict: {(chr, start, end): gene_id}
+    - gene_dict: {gene_id: [(chr, start, end), ...]}
     """
-    introns_by_chrom = defaultdict(list)
     intron_dict = {}
+    gene_dict = defaultdict(list)
     
     opener = gzip.open if intron_bed_file.endswith(".gz") else open
     
+    n_introns = 0
     with opener(intron_bed_file, 'rt') as f:
         for line in f:
             if line.startswith('#'):
                 continue
+            
             fields = line.strip().split('\t')
-            if len(fields) >= 4:
-                chrom = fields[0]
-                start = int(fields[1])
-                end = int(fields[2])
-                gene_info = fields[3]
-                
-                # Parse gene ID
-                if '_' in gene_info:
-                    gene_id = gene_info.split('_')[0]
-                elif '|' in gene_info:
-                    gene_id = gene_info.split('|')[0]
-                else:
-                    gene_id = gene_info
-                
-                introns_by_chrom[chrom].append((start, end, gene_id))
-                intron_dict[(chrom, start, end)] = gene_id
+            if len(fields) < 4:
+                continue
+            
+            chrom = fields[0]
+            start = int(fields[1])
+            end = int(fields[2])
+            
+            # Parse gene ID
+            gene_info = fields[3]
+            if '_' in gene_info:
+                gene_id = gene_info.split('_')[0]
+            elif '|' in gene_info:
+                gene_id = gene_info.split('|')[0]
+            else:
+                gene_id = gene_info
+            
+            key = (chrom, start, end)
+            intron_dict[key] = gene_id
+            gene_dict[gene_id].append(key)
+            n_introns += 1
     
-    # Sort introns by start position for each chromosome (enables binary search)
-    for chrom in introns_by_chrom:
-        introns_by_chrom[chrom].sort()
-    
-    return introns_by_chrom, intron_dict
+    print(f"Loaded {n_introns:,} introns from {len(gene_dict):,} genes", file=sys.stderr)
+    return intron_dict, gene_dict
 
-def get_spliced_introns_fast(read):
-    """Extract spliced introns from CIGAR string."""
+def fuzzy_match(query_coord, intron_dict, tolerance):
+    """
+    Fast fuzzy matching within tolerance.
+    Uses small search window instead of checking all introns.
+    """
+    q_chr, q_start, q_end = query_coord
+    
+    # Check exact match first
+    if query_coord in intron_dict:
+        return query_coord, intron_dict[query_coord]
+    
+    # Check nearby coordinates within tolerance
+    for start_offset in range(-tolerance, tolerance + 1):
+        for end_offset in range(-tolerance, tolerance + 1):
+            test_key = (q_chr, q_start + start_offset, q_end + end_offset)
+            if test_key in intron_dict:
+                return test_key, intron_dict[test_key]
+    
+    return None, None
+
+def extract_junctions_from_cigar(read):
+    """
+    Extract splice junctions from CIGAR string.
+    Returns: [(chr, start, end), ...]
+    """
     if read.is_unmapped or not read.cigartuples:
         return []
     
-    spliced = []
-    ref_pos = read.reference_start
+    junctions = []
+    pos = read.reference_start
+    chrom = read.reference_name
     
     for op, length in read.cigartuples:
         if op == 3:  # N = splice junction
-            spliced.append((read.reference_name, ref_pos, ref_pos + length))
+            junctions.append((chrom, pos, pos + length))
         if op in [0, 2, 3, 7, 8]:  # Consumes reference
-            ref_pos += length
+            pos += length
     
-    return spliced
+    return junctions
 
-def get_overlapping_introns_fast(read, introns_by_chrom, tolerance=10):
+def get_read_span(read):
+    """Get genomic span of read."""
+    if read.is_unmapped:
+        return None
+    return (read.reference_name, read.reference_start, read.reference_end)
+
+def analyze_pair_minimal(read1, read2, intron_dict, gene_dict, tolerance):
     """
-    Fast intron overlap detection using sorted intervals.
-    Only checks introns on the same chromosome.
+    Minimal analysis - trust that this IS an informative pair.
+    Just find which introns and count the evidence.
     """
-    if read.is_unmapped or read.reference_name not in introns_by_chrom:
-        return []
+    evidence = []
     
-    overlapping = []
-    read_start = read.reference_start
-    read_end = read.reference_end
+    # Extract junctions from both reads
+    junctions = extract_junctions_from_cigar(read1) + extract_junctions_from_cigar(read2)
+    if not junctions:
+        return evidence
     
-    # Only check introns on this chromosome
-    chrom_introns = introns_by_chrom[read.reference_name]
+    # Match junctions to annotated introns
+    matched_junctions = []
+    for junction in junctions:
+        matched_intron, gene_id = fuzzy_match(junction, intron_dict, tolerance)
+        if matched_intron:
+            matched_junctions.append((matched_intron, gene_id))
     
-    # Binary search to find potentially overlapping introns
-    # Since introns are sorted by start, we can skip introns that end before read starts
-    for intron_start, intron_end, gene_id in chrom_introns:
-        # Skip introns that start after read ends
-        if intron_start > read_end:
-            break
-        # Skip introns that end before read starts
-        if intron_end < read_start:
-            continue
-        # Check for overlap
-        if read_start < intron_end and read_end > intron_start:
-            overlapping.append((read.reference_name, intron_start, intron_end, gene_id))
+    if not matched_junctions:
+        return evidence
     
-    return overlapping
-
-def coords_match(coord1, coord2, tolerance=10):
-    """Check if coordinates match within tolerance."""
-    return (coord1[0] == coord2[0] and
-            abs(coord1[1] - coord2[1]) <= tolerance and
-            abs(coord1[2] - coord2[2]) <= tolerance)
-
-def analyze_read_pair_fast(read1, read2, introns_by_chrom, intron_dict, tolerance=10):
-    """Optimized read pair analysis."""
-    results = []
+    # Get read spans
+    spans = []
+    for read in [read1, read2]:
+        span = get_read_span(read)
+        if span:
+            spans.append(span)
     
-    # Get spliced and retained introns
-    all_spliced = get_spliced_introns_fast(read1) + get_spliced_introns_fast(read2)
-    all_retained = (get_overlapping_introns_fast(read1, introns_by_chrom, tolerance) + 
-                    get_overlapping_introns_fast(read2, introns_by_chrom, tolerance))
-    
-    if not all_spliced or not all_retained:
-        return results
-    
-    # Match spliced coordinates to annotated introns
-    spliced_annotated = []
-    for spliced_coord in all_spliced:
-        # Direct lookup in dictionary instead of searching
-        for (chrom, start, end), gene_id in intron_dict.items():
-            if coords_match(spliced_coord, (chrom, start, end), tolerance):
-                spliced_annotated.append((chrom, start, end, gene_id))
-                break
-    
-    if not spliced_annotated:
-        return results
-    
-    # Record evidence for each pair
-    for spliced in spliced_annotated:
-        for retained in all_retained:
-            if spliced[3] != retained[3]:  # Same gene only
+    # For each matched junction, find retained introns in the same gene
+    for (splice_chr, splice_start, splice_end), gene_id in matched_junctions:
+        
+        # Get all introns for this gene
+        gene_introns = gene_dict.get(gene_id, [])
+        
+        # Check which ones overlap our read spans
+        for span_chr, span_start, span_end in spans:
+            if span_chr != splice_chr:
                 continue
             
-            gene_id = spliced[3]
-            
-            # Determine order
-            if spliced[1] < retained[1]:
-                intron1 = (spliced[0], spliced[1], spliced[2])
-                intron2 = (retained[0], retained[1], retained[2])
-                direction = 'upstream'
-            else:
-                intron1 = (retained[0], retained[1], retained[2])
-                intron2 = (spliced[0], spliced[1], spliced[2])
-                direction = 'downstream'
-            
-            results.append((gene_id, intron1, intron2, direction))
+            for intron_chr, intron_start, intron_end in gene_introns:
+                # Skip if it's the same intron
+                if intron_start == splice_start and intron_end == splice_end:
+                    continue
+                
+                # Check if span overlaps this intron
+                if span_start < intron_end and span_end > intron_start:
+                    # Found evidence! Determine order
+                    if splice_start < intron_start:
+                        # Upstream spliced, downstream retained
+                        evidence.append((
+                            gene_id,
+                            (splice_start, splice_end),
+                            (intron_start, intron_end),
+                            'upstream'
+                        ))
+                    else:
+                        # Downstream spliced, upstream retained
+                        evidence.append((
+                            gene_id,
+                            (intron_start, intron_end),
+                            (splice_start, splice_end),
+                            'downstream'
+                        ))
     
-    return results
+    return evidence
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Optimized splicing order analysis'
+        description='Zero-redundancy splicing order counter - trusts pre-filtered BAM'
     )
-    parser.add_argument('--bam', required=True)
-    parser.add_argument('--intron-bed', required=True)
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--min-reads', type=int, default=5)
-    parser.add_argument('--min-mapq', type=int, default=10)
-    parser.add_argument('--tolerance', type=int, default=10)
-    
+    parser.add_argument('--bam', required=True, help='Informative pairs BAM (pre-filtered)')
+    parser.add_argument('--intron-bed', required=True, help='Intron annotations BED')
+    parser.add_argument('--output', required=True, help='Output TSV')
+    parser.add_argument('--min-reads', type=int, default=5, help='Min read support')
+    parser.add_argument('--min-mapq', type=int, default=10, help='Min MAPQ filter')
+    parser.add_argument('--tolerance', type=int, default=10, help='Junction match tolerance')
     args = parser.parse_args()
     
-    print(f"Loading intron annotations from {args.intron_bed}", file=sys.stderr)
-    introns_by_chrom, intron_dict = load_intron_annotations(args.intron_bed)
-    total_introns = sum(len(introns) for introns in introns_by_chrom.values())
-    print(f"  Loaded {total_introns} introns across {len(introns_by_chrom)} chromosomes", 
-          file=sys.stderr)
+    # Load annotations
+    print("Loading intron annotations...", file=sys.stderr)
+    intron_dict, gene_dict = load_introns_simple(args.intron_bed)
     
-    print(f"Loading informative read pairs from {args.bam}", file=sys.stderr)
-    
-    # Process BAM in one pass - group reads by name
-    reads_by_name = defaultdict(list)
-    total_reads = 0
-    filtered_unmapped = 0
-    filtered_low_mapq = 0
+    # Process BAM - single pass, group by read name
+    print(f"Processing BAM: {args.bam}", file=sys.stderr)
+    pairs = defaultdict(list)
+    n_reads = 0
+    n_filtered = 0
     
     with pysam.AlignmentFile(args.bam, 'rb') as bam:
         for read in bam:
-            total_reads += 1
+            n_reads += 1
             
-            if read.is_unmapped:
-                filtered_unmapped += 1
-                continue
-            if read.mapping_quality < args.min_mapq:
-                filtered_low_mapq += 1
+            # Basic quality filter
+            if read.is_unmapped or read.mapping_quality < args.min_mapq:
+                n_filtered += 1
                 continue
             
-            reads_by_name[read.query_name].append(read)
+            pairs[read.query_name].append(read)
+            
+            if n_reads % 100000 == 0:
+                print(f"  {n_reads:,} reads, {len(pairs):,} pairs", file=sys.stderr)
     
-    print(f"  Total reads: {total_reads}", file=sys.stderr)
-    print(f"  Filtered (unmapped): {filtered_unmapped}", file=sys.stderr)
-    print(f"  Filtered (MAPQ < {args.min_mapq}): {filtered_low_mapq}", file=sys.stderr)
-    print(f"  Unique read pairs: {len(reads_by_name)}", file=sys.stderr)
+    print(f"  Total reads: {n_reads:,}", file=sys.stderr)
+    print(f"  Filtered (unmapped/low MAPQ): {n_filtered:,}", file=sys.stderr)
+    print(f"  Valid pairs: {len(pairs):,}", file=sys.stderr)
     
-    # Analyze pairs
-    print("Analyzing read pairs...", file=sys.stderr)
-    pair_counts = defaultdict(lambda: {'upstream': 0, 'downstream': 0})
+    # Count evidence
+    print("Counting evidence...", file=sys.stderr)
+    evidence_counts = defaultdict(lambda: {'upstream': 0, 'downstream': 0})
     
-    pairs_analyzed = 0
-    evidence_found = 0
+    n_pairs = 0
+    n_evidence = 0
     
-    for query_name, reads in reads_by_name.items():
-        if len(reads) != 2:
+    for read_name, read_list in pairs.items():
+        # Skip if not proper pair
+        if len(read_list) != 2:
             continue
         
-        pairs_analyzed += 1
-        if pairs_analyzed % 50000 == 0:  # Report less frequently
-            print(f"  Processed {pairs_analyzed} pairs, {evidence_found} evidence events...",
+        n_pairs += 1
+        if n_pairs % 10000 == 0:
+            print(f"  {n_pairs:,} pairs analyzed, {n_evidence:,} evidence events", 
                   file=sys.stderr)
         
-        read1, read2 = reads
-        results = analyze_read_pair_fast(read1, read2, introns_by_chrom, intron_dict, args.tolerance)
+        # Analyze this pair
+        evidence = analyze_pair_minimal(
+            read_list[0], read_list[1],
+            intron_dict, gene_dict,
+            args.tolerance
+        )
         
-        for gene_id, intron1, intron2, direction in results:
-            evidence_found += 1
-            key = f"{intron1[0]}\t{gene_id}\t{intron1[1]}\t{intron1[2]}\t{intron2[1]}\t{intron2[2]}"
-            pair_counts[key][direction] += 1
+        # Count evidence
+        for gene_id, intron1, intron2, direction in evidence:
+            # Use first read's chr for output
+            chrom = read_list[0].reference_name
+            key = f"{chrom}:{gene_id}:{intron1[0]}:{intron1[1]}:{intron2[0]}:{intron2[1]}"
+            evidence_counts[key][direction] += 1
+            n_evidence += 1
     
-    print(f"\nAnalyzed {pairs_analyzed} read pairs", file=sys.stderr)
-    print(f"Found {evidence_found} splicing evidence events", file=sys.stderr)
-    print(f"Unique intron pairs: {len(pair_counts)}", file=sys.stderr)
+    print(f"  Total pairs analyzed: {n_pairs:,}", file=sys.stderr)
+    print(f"  Total evidence events: {n_evidence:,}", file=sys.stderr)
+    print(f"  Unique intron pairs: {len(evidence_counts):,}", file=sys.stderr)
     
     # Write output
-    print(f"Writing results to {args.output}", file=sys.stderr)
-    with open(args.output, 'w') as f:
-        f.write("chr\tgene_id\tintron1_start\tintron1_end\t"
-                "intron2_start\tintron2_end\t"
-                "upstream\tdownstream\ttotal\tfraction_downstream\n")
+    print(f"Writing results to {args.output}...", file=sys.stderr)
+    n_written = 0
+    
+    with open(args.output, 'w') as out:
+        # Header
+        out.write("chr\tgene_id\tintron1_start\tintron1_end\t"
+                 "intron2_start\tintron2_end\t"
+                 "upstream\tdownstream\ttotal\tfraction_downstream\n")
         
-        valid_pairs = 0
-        for key, counts in sorted(pair_counts.items()):
-            upstream = counts['upstream']
-            downstream = counts['downstream']
+        # Data
+        for key in sorted(evidence_counts.keys()):
+            parts = key.split(':')
+            chrom = parts[0]
+            gene_id = parts[1]
+            coords = list(map(int, parts[2:]))
+            
+            upstream = evidence_counts[key]['upstream']
+            downstream = evidence_counts[key]['downstream']
             total = upstream + downstream
             
+            # Filter by minimum reads
             if total >= args.min_reads:
-                frac_down = downstream / total if total > 0 else 0.5
-                f.write(f"{key}\t{upstream}\t{downstream}\t{total}\t{frac_down:.4f}\n")
-                valid_pairs += 1
-        
-        print(f"  Wrote {valid_pairs} intron pairs with ≥{args.min_reads} reads",
-              file=sys.stderr)
+                fraction_down = downstream / total if total > 0 else 0.5
+                out.write(f"{chrom}\t{gene_id}\t"
+                         f"{coords[0]}\t{coords[1]}\t{coords[2]}\t{coords[3]}\t"
+                         f"{upstream}\t{downstream}\t{total}\t{fraction_down:.4f}\n")
+                n_written += 1
+    
+    print(f"Done! Wrote {n_written:,} intron pairs with ≥{args.min_reads} reads", 
+          file=sys.stderr)
+    print(f"Output: {args.output}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
