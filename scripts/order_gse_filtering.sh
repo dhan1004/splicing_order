@@ -32,17 +32,20 @@ aligned_bam_file="${star_out_prefix}Aligned.sortedByCoord.out.bam"
 
 # Intermediate files
 TEMP_PREFIX="temp_${gsm_id}"
-ALL_PAIRED_SAM="${out_dir}/${TEMP_PREFIX}_all_paired_reads.sam"
-PAIRED_JUNCS_SAM="${out_dir}/${TEMP_PREFIX}_junction_paired_reads.sam"
-INTRON_OVERLAP_BED="${out_dir}/${TEMP_PREFIX}_intron_reads.bed"
-SORTED_BAM_PREFIX="${out_dir}/${TEMP_PREFIX}_intermediate_reads_sorted"
+GSM_PREFIX="${gsm_id}"
+ALL_PAIRED_SAM="${out_dir}/${GSM_PREFIX}_all_paired_reads.sam"
+PAIRED_JUNCS_SAM="${out_dir}/${GSM_PREFIX}_junction_paired_reads.sam"
+INTRON_OVERLAP_BED="${out_dir}/${GSM_PREFIX}_intron_reads.bed"
+SORTED_BAM_PREFIX="${out_dir}/${GSM_PREFIX}_intermediate_reads_sorted"
 
 # Final outputs
 informative_pairs_bam="${out_dir}/${gsm_id}_informative_pairs.bam"
 splicing_order_output="${out_dir}/${gsm_id}_pairwise_splicing_order.tsv"
+structure_features_output="${out_dir}/${gsm_id}_structure_features.tsv"
 
 # Reference files
 reference_genome_dir="/users/dhan30/reference/hg38"
+reference_genome_fasta="/users/dhan30/reference/hg38.fa"
 intron_bed_file="/users/dhan30/reference/hg38.gencode.basic.v43.introns.bed.gz"
 
 # Script directory
@@ -59,46 +62,60 @@ printf "$(date +'%d/%b/%Y %H:%M:%S') | Loading conda environment...\n"
 module load miniconda3/23.11.0s
 source /oscar/runtime/software/external/miniconda3/23.11.0/etc/profile.d/conda.sh
 conda activate order_env
+export PATH="/users/dhan30/.conda/envs/order_env/bin:$PATH"
 
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Active environment: $CONDA_DEFAULT_ENV\n"
 
 ################################################################################
-# CHECKPOINT 1: Check if final output already exists
+# CHECKPOINT 1: Check if final outputs already exist
 ################################################################################
 
-# if [ -f "$splicing_order_output" ] && [ -s "$splicing_order_output" ]; then
-#     printf "$(date +'%d/%b/%Y %H:%M:%S') | Final output already exists. Sample complete!\n"
-#     exit 0
-# fi
+if [ -f "$structure_features_output" ] && [ -s "$structure_features_output" ]; then
+    line_count=$(wc -l < "$structure_features_output")
+    
+    if [ "$line_count" -gt 1 ]; then
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | Structure features file exists with $((line_count - 1)) intron pairs. Sample complete!\n"
+        exit 0
+    else
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | Structure features file is empty (header only). Reprocessing...\n"
+        rm -f "$structure_features_output"
+    fi
+fi
 
 if [ -f "$splicing_order_output" ] && [ -s "$splicing_order_output" ]; then
     line_count=$(wc -l < "$splicing_order_output")
     
     if [ "$line_count" -gt 1 ]; then
-        printf "$(date +'%d/%b/%Y %H:%M:%S') | Final output exists with $((line_count - 1)) intron pairs. Sample complete!\n"
-        exit 0
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | Splicing order output exists with $((line_count - 1)) intron pairs.\n"
+        # Continue to structure analysis if not done
+        skip_to_structure=true
     else
         printf "$(date +'%d/%b/%Y %H:%M:%S') | Output file is empty (header only). Reprocessing...\n"
         rm -f "$splicing_order_output"
+        skip_to_structure=false
     fi
+else
+    skip_to_structure=false
 fi
 
 ################################################################################
 # CHECKPOINT 2: Check if alignment exists (most important checkpoint)
 ################################################################################
 
-if [ -f "$aligned_bam_file" ] && [ -s "$aligned_bam_file" ]; then
-    printf "$(date +'%d/%b/%Y %H:%M:%S') | STAR alignment file found. Skipping to informative pairs extraction...\n"
-    skip_to_extraction=true
-else
-    skip_to_extraction=false
+if [ "$skip_to_structure" = false ]; then
+    if [ -f "$aligned_bam_file" ] && [ -s "$aligned_bam_file" ]; then
+        printf "$(date +'%d/%b/%Y %H:%M:%S') | STAR alignment file found. Skipping to informative pairs extraction...\n"
+        skip_to_extraction=true
+    else
+        skip_to_extraction=false
+    fi
 fi
 
 ################################################################################
 # CHECKPOINT 3: Check if trimmed files exist (only matters if we need alignment)
 ################################################################################
 
-if [ "$skip_to_extraction" = false ]; then
+if [ "$skip_to_structure" = false ] && [ "$skip_to_extraction" = false ]; then
     if [ -f "$paired_trimmed_one_file" ] && [ -f "$paired_trimmed_two_file" ]; then
         printf "$(date +'%d/%b/%Y %H:%M:%S') | Trimmed files found. Skipping download and trimming...\n"
         skip_to_alignment=true
@@ -111,7 +128,7 @@ fi
 # DOWNLOAD & TRIM (only if we need to align)
 ################################################################################
 
-if [ "$skip_to_extraction" = false ] && [ "$skip_to_alignment" = false ]; then
+if [ "$skip_to_structure" = false ] && [ "$skip_to_extraction" = false ] && [ "$skip_to_alignment" = false ]; then
 
     # --- CHECKPOINT 2: Check if raw reads exist ---
     if [ -f "$paired_read_one_file" ] && [ -f "$paired_read_two_file" ] && [ -s "$paired_read_one_file" ]; then
@@ -215,7 +232,7 @@ fi
 # ALIGNMENT (only if we don't have STAR BAM)
 ################################################################################
 
-if [ "$skip_to_extraction" = false ]; then
+if [ "$skip_to_structure" = false ] && [ "$skip_to_extraction" = false ]; then
     # Check if trimmed files exist before attempting alignment
     if [ ! -f "$paired_trimmed_one_file" ] || [ ! -f "$paired_trimmed_two_file" ]; then
         printf "ERROR: Cannot run alignment - trimmed files not found\n"
@@ -254,102 +271,155 @@ fi  # End of alignment block
 # EXTRACT INFORMATIVE PAIRS (Kim et al. methodology)
 ################################################################################
 
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Extracting informative pairs...\n"
+if [ "$skip_to_structure" = false ]; then
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Extracting informative pairs...\n"
 
-# Step 1: Convert to name-sorted SAM
-printf "$(date +'%d/%b/%Y %H:%M:%S') |   Converting to name-sorted SAM...\n"
-samtools sort -n -O SAM -@ "$threads" -o "${ALL_PAIRED_SAM}" "${aligned_bam_file}"
+    # Step 1: Convert to name-sorted SAM
+    printf "$(date +'%d/%b/%Y %H:%M:%S') |   Converting to name-sorted SAM...\n"
+    samtools sort -n -O SAM -@ "$threads" -o "${ALL_PAIRED_SAM}" "${aligned_bam_file}"
 
-# Step 2: Extract junction-containing pairs
-printf "$(date +'%d/%b/%Y %H:%M:%S') |   Extracting junction pairs...\n"
-awk 'BEGIN {OFS="\t"}
-    /^@/ {print; next}
-    $6 ~ /N/ {junction_reads[$1]=1}
-    END {
-        while ((getline < "'"${ALL_PAIRED_SAM}"'") > 0) {
-            if ($0 ~ /^@/) continue
-            if ($1 in junction_reads) print
-        }
-    }' "${ALL_PAIRED_SAM}" > "${PAIRED_JUNCS_SAM}"
+    # Step 2: Extract junction-containing pairs
+    printf "$(date +'%d/%b/%Y %H:%M:%S') |   Extracting junction pairs...\n"
+    awk 'BEGIN {OFS="\t"}
+        /^@/ {print; next}
+        $6 ~ /N/ {junction_reads[$1]=1}
+        END {
+            while ((getline < "'"${ALL_PAIRED_SAM}"'") > 0) {
+                if ($0 ~ /^@/) continue
+                if ($1 in junction_reads) print
+            }
+        }' "${ALL_PAIRED_SAM}" > "${PAIRED_JUNCS_SAM}"
 
-rm "${ALL_PAIRED_SAM}"
+    rm "${ALL_PAIRED_SAM}"
 
-# Step 3: Find intron-overlapping reads
-printf "$(date +'%d/%b/%Y %H:%M:%S') |   Finding intron overlaps (f=0.05)...\n"
-samtools view -bh "${PAIRED_JUNCS_SAM}" | \
-    bedtools bamtobed -split -i stdin | \
-    bedtools intersect -f 0.05 -a stdin -b "${intron_bed_file}" > "${INTRON_OVERLAP_BED}"
+    # Step 3: Find intron-overlapping reads
+    printf "$(date +'%d/%b/%Y %H:%M:%S') |   Finding intron overlaps (f=0.05)...\n"
+    samtools view -bh "${PAIRED_JUNCS_SAM}" | \
+        bedtools bamtobed -split -i stdin | \
+        bedtools intersect -f 0.05 -a stdin -b "${intron_bed_file}" > "${INTRON_OVERLAP_BED}"
 
-# Step 4: Extract pairs where one has junction AND one overlaps intron
-printf "$(date +'%d/%b/%Y %H:%M:%S') |   Extracting informative pairs...\n"
-awk '{print $4}' "${INTRON_OVERLAP_BED}" | \
-    sed 's/\/[12]$//' | \
-    sort -u > "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt"
+    # Step 4: Extract pairs where one has junction AND one overlaps intron
+    printf "$(date +'%d/%b/%Y %H:%M:%S') |   Extracting informative pairs...\n"
+    awk '{print $4}' "${INTRON_OVERLAP_BED}" | \
+        sed 's/\/[12]$//' | \
+        sort -u > "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt"
 
-(grep "^@" "${PAIRED_JUNCS_SAM}"; \
-    grep -wFf "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt" "${PAIRED_JUNCS_SAM}") | \
-    samtools view -bh - | \
-    samtools fixmate -m - - | \
-    samtools sort -@ "$threads" -o "${SORTED_BAM_PREFIX}.bam" - ||
-    { printf "ERROR: Failed to create sorted BAM\n"; exit 1; }
+    (grep "^@" "${PAIRED_JUNCS_SAM}"; \
+        grep -wFf "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt" "${PAIRED_JUNCS_SAM}") | \
+        samtools view -bh - | \
+        samtools fixmate -m - - | \
+        samtools sort -@ "$threads" -o "${SORTED_BAM_PREFIX}.bam" - ||
+        { printf "ERROR: Failed to create sorted BAM\n"; exit 1; }
 
-# Step 5: Remove duplicates
-printf "$(date +'%d/%b/%Y %H:%M:%S') |   Removing duplicates...\n"
-samtools markdup -r -@ "$threads" "${SORTED_BAM_PREFIX}.bam" "${informative_pairs_bam}"
-samtools index "${informative_pairs_bam}"
+    # Step 5: Remove duplicates
+    printf "$(date +'%d/%b/%Y %H:%M:%S') |   Removing duplicates...\n"
+    samtools markdup -r -@ "$threads" "${SORTED_BAM_PREFIX}.bam" "${informative_pairs_bam}"
+    samtools index "${informative_pairs_bam}"
 
-# Cleanup intermediate files to save space
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleaning up intermediate files...\n"
-rm -f "${PAIRED_JUNCS_SAM}" "${INTRON_OVERLAP_BED}" 
-rm -f "${SORTED_BAM_PREFIX}.bam" "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt"
+    # Cleanup intermediate files to save space
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleaning up intermediate files...\n"
+    rm -f "${PAIRED_JUNCS_SAM}" "${INTRON_OVERLAP_BED}" 
+    rm -f "${SORTED_BAM_PREFIX}.bam" "${out_dir}/${TEMP_PREFIX}_intron_read_names.txt"
 
-# Optionally delete STAR alignment BAM if you only need informative pairs
-# Uncomment the line below if you want to save even more space
-# rm -f "${aligned_bam_file}" "${aligned_bam_file}.bai"
+    # Delete STAR alignment BAM to save disk space - we only need informative pairs
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Deleting STAR alignment to save disk space...\n"
+    rm -f "${aligned_bam_file}" "${aligned_bam_file}.bai"
 
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Informative pairs extraction complete.\n"
-printf "  Total reads: $(samtools view -c ${informative_pairs_bam})\n"
-printf "  Read pairs: $(($(samtools view -c ${informative_pairs_bam}) / 2))\n"
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Informative pairs extraction complete.\n"
+    printf "  Total reads: $(samtools view -c ${informative_pairs_bam})\n"
+    printf "  Read pairs: $(($(samtools view -c ${informative_pairs_bam}) / 2))\n"
+fi  # End of informative pairs extraction
 
 ################################################################################
 # ANALYZE SPLICING ORDER
 ################################################################################
 
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Analyzing splicing order...\n"
+if [ "$skip_to_structure" = false ]; then
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Analyzing splicing order...\n"
 
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Ensuring conda environment is active...\n"
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Ensuring conda environment is active...\n"
+    module load miniconda3/23.11.0s
+    source /oscar/runtime/software/external/miniconda3/23.11.0/etc/profile.d/conda.sh
+    conda activate order_env
+    export PATH="/users/dhan30/.conda/envs/order_env/bin:$PATH"
+
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Active environment: $CONDA_DEFAULT_ENV\n"
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Python location: $(which python3)\n"
+
+    # Verify pysam is available
+    python3 -c "import pysam" || {
+        printf "ERROR: pysam not available in environment\n"
+        exit 1
+    }
+
+    python3 ${SCRIPT_DIR}/analyze_splicing_order.py \
+        --bam "${informative_pairs_bam}" \
+        --intron-bed "${intron_bed_file}" \
+        --output "${splicing_order_output}" \
+        --min-reads 5 \
+        --min-mapq 10 \
+        --tolerance 10 ||
+        { printf "ERROR: Splicing order analysis failed\n"; exit 1; }
+
+    printf "$(date +'%d/%b/%Y %H:%M:%S') | Splicing order analysis complete.\n"
+fi  # End of splicing order analysis
+
+################################################################################
+# EXTRACT RNA STRUCTURE FEATURES
+################################################################################
+
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Extracting RNA structure features...\n"
+
+# Ensure conda environment is active
 module load miniconda3/23.11.0s
 source /oscar/runtime/software/external/miniconda3/23.11.0/etc/profile.d/conda.sh
 conda activate order_env
+export PATH="/users/dhan30/.conda/envs/order_env/bin:$PATH"
 
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Active environment: $CONDA_DEFAULT_ENV\n"
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Python location: $(which python3)\n"
-
-# Verify pysam is available
-python3 -c "import pysam" || {
-    printf "ERROR: pysam not available in environment\n"
+# Check if RNAfold is available
+if ! command -v RNAfold &> /dev/null; then
+    printf "ERROR: RNAfold not found in conda environment\n"
     exit 1
-}
+fi
 
-python3 scripts/analyze_splicing_order.py \
-    --bam "${informative_pairs_bam}" \
-    --intron-bed "${intron_bed_file}" \
-    --output "${splicing_order_output}" \
-    --min-reads 5 \
-    --min-mapq 10 \
-    --tolerance 10 ||
-    { printf "ERROR: Splicing order analysis failed\n"; exit 1; }
+printf "$(date +'%d/%b/%Y %H:%M:%S') | RNAfold found: $(which RNAfold)\n"
+
+# Run structure feature extraction
+python3 ${SCRIPT_DIR}/extract_structure_features.py \
+    --intron-pairs "${splicing_order_output}" \
+    --fasta "${reference_genome_fasta}" \
+    --output "${structure_features_output}" \
+    --padding 50 ||
+    { printf "ERROR: Structure feature extraction failed\n"; exit 1; }
+
+printf "$(date +'%d/%b/%Y %H:%M:%S') | RNA structure feature extraction complete.\n"
+
+################################################################################
+# FINAL SUMMARY
+################################################################################
 
 printf "$(date +'%d/%b/%Y %H:%M:%S') | Sample %s processing complete!\n" "${gsm_id}"
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Results: %s\n" "${splicing_order_output}"
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Splicing order results: %s\n" "${splicing_order_output}"
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Structure features: %s\n" "${structure_features_output}"
+
+# Count results
+if [ -f "${splicing_order_output}" ]; then
+    n_pairs=$(tail -n +2 "${splicing_order_output}" | wc -l)
+    printf "  Intron pairs analyzed: %s\n" "$n_pairs"
+fi
+
+if [ -f "${structure_features_output}" ]; then
+    n_features=$(tail -n +2 "${structure_features_output}" | wc -l)
+    printf "  Intron pairs with structure features: %s\n" "$n_features"
+fi
 
 # Cleanup intermediate files to save space
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleaning up intermediate files...\n"
+printf "$(date +'%d/%b/%Y %H:%M:%S') | Final cleanup...\n"
 rm -f "$paired_read_one_file" "$paired_read_two_file" 2>/dev/null
 rm -f "$paired_trimmed_one_file" "$paired_trimmed_two_file" 2>/dev/null
 rm -f "${star_out_prefix}"*.out "${star_out_prefix}"*.tab 2>/dev/null
 rm -f "${out_dir}"/temp_* 2>/dev/null
 
-printf "$(date +'%d/%b/%Y %H:%M:%S') | Cleanup complete.\n"
+printf "$(date +'%d/%b/%Y %H:%M:%S') | All processing complete for %s!\n" "${gsm_id}"
 
 conda deactivate

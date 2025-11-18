@@ -1,0 +1,28 @@
+================================================================================
+RNA SECONDARY STRUCTURE ANALYSIS - SUMMARY REPORT
+================================================================================
+
+1. DATASET OVERVIEW
+   Total intron pairs: 14,991
+   Unique samples: 670
+   Unique genes: 28
+   Total reads: 476,679
+   Mean reads/pair: 31.8
+   Median reads/pair: 10
+
+2. SPLICING ORDER DISTRIBUTION
+   Mean fraction downstream: 0.559
+   Median fraction downstream: 0.500
+   T-test vs 0.5: t=23.286, p=7.58e-118
+   Upstream-biased (<0.4): 4,098 (27.3%)
+   Downstream-biased (>0.6): 5,659 (37.7%)
+   Neutral (0.4-0.6): 5,234 (34.9%)
+
+3. STRUCTURE-SPLICING CORRELATIONS
+   MFE Difference            r= -0.073, p=5.01e-19 ***
+   5'SS Accessibility        r=  0.196, p=1.35e-129 ***
+   3'SS Accessibility        r=  0.224, p=1.41e-170 ***
+
+================================================================================
+Analysis complete. See figures/ directory for visualizations.
+================================================================================

@@ -196,7 +196,7 @@ def analyze_intron_structure(sequence, intron_length, padding=0):
         'ss3_paired': ss3_paired
     }
 
-def process_intron_pair(row, fasta_file, padding=50):
+def process_intron_pair(row, fasta_file, padding=50, max_intron_size=1000):
     """
     Process one intron pair: fold each intron separately.
     
@@ -204,9 +204,10 @@ def process_intron_pair(row, fasta_file, padding=50):
         row: DataFrame row with intron pair information
         fasta_file: Path to reference genome FASTA
         padding: Amount of flanking sequence to include (bp)
+        max_intron_size: Maximum intron size to process (bp)
     
     Returns:
-        dict with features for both introns
+        dict with features for both introns, or None if introns too large
     """
     chrom = row['chr']
     gene_id = row['gene_id']
@@ -219,6 +220,10 @@ def process_intron_pair(row, fasta_file, padding=50):
     intron2_start = int(row['intron2_start'])
     intron2_end = int(row['intron2_end'])
     intron2_length = intron2_end - intron2_start
+    
+    # NEW: Check if introns are too large
+    if intron1_length > max_intron_size or intron2_length > max_intron_size:
+        return None
     
     # Extract sequences with padding
     intron1_seq = extract_sequence(
@@ -238,7 +243,6 @@ def process_intron_pair(row, fasta_file, padding=50):
     
     # Fold each intron
     intron1_structure = analyze_intron_structure(intron1_seq, intron1_length, padding)
-    print("intron1 strutcure ", intron1_structure)
     intron2_structure = analyze_intron_structure(intron2_seq, intron2_length, padding)
     
     if not intron1_structure or not intron2_structure:
@@ -311,7 +315,7 @@ def process_intron_pair(row, fasta_file, padding=50):
     else:
         result['intron1_more_accessible'] = None
 
-    print(result)
+    # print(result)
     
     return result
 
