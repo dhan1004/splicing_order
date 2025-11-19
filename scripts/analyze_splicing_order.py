@@ -172,6 +172,8 @@ def main():
     parser.add_argument('--min-reads', type=int, default=5, help='Min read support')
     parser.add_argument('--min-mapq', type=int, default=10, help='Min MAPQ filter')
     parser.add_argument('--tolerance', type=int, default=10, help='Junction match tolerance')
+    parser.add_argument('--max-intron-length', type=int, default=None, 
+                    help='Maximum intron length (bp) - filter intron pairs')
     args = parser.parse_args()
     
     # Load annotations
@@ -229,6 +231,11 @@ def main():
         # Count evidence
         for gene_id, intron1, intron2, direction in evidence:
             # Use first read's chr for output
+            if args.max_intron_length:
+                intron1_len = abs(intron1[2] - intron1[1])  # end - start
+                intron2_len = abs(intron2[2] - intron2[1])
+                if intron1_len > args.max_intron_length or intron2_len > args.max_intron_length:
+                    continue
             chrom = read_list[0].reference_name
             key = f"{chrom}:{gene_id}:{intron1[0]}:{intron1[1]}:{intron2[0]}:{intron2[1]}"
             evidence_counts[key][direction] += 1

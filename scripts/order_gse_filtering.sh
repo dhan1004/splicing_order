@@ -358,7 +358,8 @@ if [ "$skip_to_structure" = false ]; then
         --output "${splicing_order_output}" \
         --min-reads 5 \
         --min-mapq 10 \
-        --tolerance 10 ||
+        --tolerance 10 \
+        --max-intron-length 500 ||
         { printf "ERROR: Splicing order analysis failed\n"; exit 1; }
 
     printf "$(date +'%d/%b/%Y %H:%M:%S') | Splicing order analysis complete.\n"

@@ -1,9 +1,0 @@
-read_name	chrom	read1_mfe	read1_ensemble_energy	read1_structure	read1_accessibility	read1_mfe_window_50_mean	read1_mfe_window_50_min	read1_mfe_window_50_std	read1_mfe_window_100_mean	read1_mfe_window_100_min	read1_mfe_window_100_std	read1_mfe_window_200_mean	read1_mfe_window_200_min	read1_mfe_window_200_std	read1_seq_length	read1_gc_content	read2_mfe	read2_ensemble_energy	read2_structure	read2_accessibility	read2_mfe_window_50_mean	read2_mfe_window_50_min	read2_mfe_window_50_std	read2_mfe_window_100_mean	read2_mfe_window_100_min	read2_mfe_window_100_std	read2_mfe_window_200_mean	read2_mfe_window_200_min	read2_mfe_window_200_std	read2_seq_length	read2_gc_content
-SRR16235582.15179334	chr1														879	0.5676905574516496														301	0.6013289036544851
-SRR16235582.29984804	chr1														300	0.4766666666666667														478	0.5941422594142259
-SRR16235582.28043256	chr1														478	0.5941422594142259														301	0.6079734219269103
-SRR16235582.4956429	chr1														475	0.5957894736842105														301	0.6245847176079734
-SRR16235582.12354810	chr1														475	0.5957894736842105														301	0.6245847176079734
-SRR16235582.30876634	chr1														476	0.5945378151260504														301	0.6013289036544851
-SRR16235582.23813381	chr1														477	0.5911949685534591														458	0.6179039301310044
-SRR16235582.29226720	chr1														301	0.5946843853820598														458	0.6179039301310044
